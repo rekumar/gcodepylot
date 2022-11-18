@@ -1,3 +1,4 @@
+from typing import List
 import serial
 import time
 import re
@@ -8,15 +9,18 @@ from functools import partial
 
 
 class Robot:
-    POLLINGDELAY = 0.05  # seconds between sending a message and polling for a reply
-    TIMEOUT = 10  # seconds
-    POSITIONTOLERANCE = 0.1  # tolerance (mm) between target and actual position
-    ZHOP_HEIGHT = (
+    POLLINGDELAY: float = (
+        0.01  # seconds between sending a message and polling for a reply
+    )
+    TIMEOUT: float = 10  # seconds
+    POSITIONTOLERANCE: float = 0.1  # tolerance (mm) between target and actual position
+    ZHOP_HEIGHT: float = (
         5  # height (mm) to raise gantry between movements. This is to avoid collisions.
     )
-    XLIM = [0, 235]  # mm
-    YLIM = [0, 235]
-    ZLIM = [0, 250]
+    XLIM: List[int] = [0, 235]  # mm
+    YLIM: List[int] = [0, 235]
+    ZLIM: List[int] = [0, 250]
+    MAX_XY_FEEDRATE: int = 10000  # mm/min
 
     def __init__(self, port):
         # communication variables
@@ -28,6 +32,31 @@ class Robot:
         ]  # start at None's to indicate stage has not been homed.
         self.__targetposition = [None, None, None]
         self.connect()  # connect by default
+
+    @property
+    def speed(self):
+        return self._speed_fraction
+
+    @speed.setter
+    def speed(self, speed):
+        if (speed <= 0) or (speed > 1):
+            raise ValueError(
+                f"Speed must be between 0 and 1 (fraction of the maximum speed, which is {self.MAX_XY_FEEDRATE} mm/min)."
+            )
+        self._speed_fraction = speed
+        self.write(f"G1 F{int(self.MAX_XY_FEEDRATE * speed)}")
+
+    @property
+    def speed_mm_per_min(self):
+        return self.speed * self.MAX_XY_FEEDRATE
+
+    @speed_mm_per_min.setter
+    def speed_mm_per_min(self, speed):
+        if (speed <= 0) or (speed > self.MAX_XY_FEEDRATE):
+            raise ValueError(
+                f"Speed must be between 0 and {self.MAX_XY_FEEDRATE} mm/min."
+            )
+        self.speed = speed / self.MAX_XY_FEEDRATE
 
     # communication methods
     def connect(self):
@@ -51,6 +80,12 @@ class Robot:
     def disconnect(self):
         self._handle.close()
         del self._handle
+
+    def _set_defaults(self):
+        self.write(
+            f"G203 X{self.MAX_XY_FEEDRATE} Y{self.MAX_XY_FEEDRATE} Z{self.MAX_XY_FEEDRATE}"
+        )
+        self.speed = 0.8
 
     def write(self, msg):
         self._handle.write(f"{msg}\n".encode())
@@ -101,12 +136,18 @@ class Robot:
         if y is None:
             y = self.position[1]
         if z is None:
-            y = self.position[2]
+            z = self.position[2]
 
-        # check if we are transitioning between workspace/gantry, if so, handle it
+        # check if this is a valid coordinate
+        if not (self.XLIM[0] <= x <= self.XLIM[1]):
+            raise ValueError(f"X coordinate {x} is out of range {self.XLIM}.")
+        if not (self.YLIM[0] <= y <= self.YLIM[1]):
+            raise ValueError(f"Y coordinate {y} is out of range {self.YLIM}.")
+        if not (self.ZLIM[0] <= z <= self.ZLIM[1]):
+            raise ValueError(f"Z coordinate {z} is out of range {self.ZLIM}.")
         return x, y, z
 
-    def moveto(self, x=None, y=None, z=None, zhop=True, speed=None):
+    def moveto(self, x=None, y=None, z=None, zhop=False):
         """
         moves to target position in x,y,z (mm)
         """
@@ -116,31 +157,30 @@ class Robot:
         except:
             pass
         x, y, z = self.premove(x, y, z)  # will error out if invalid move
-        if speed is None:
-            speed = self.speed
         if (x == self.position[0]) and (y == self.position[1]):
             zhop = False  # no use zhopping for no lateral movement
+
         if zhop:
             z_ceiling = max(self.position[2], z) + self.ZHOP_HEIGHT
             z_ceiling = min(
                 z_ceiling, self.ZLIM[1]
             )  # cant z-hop above build volume. mostly here for first move after homing.
-            self.moveto(z=z_ceiling, zhop=False, speed=speed)
-            self.moveto(x, y, z_ceiling, zhop=False, speed=speed)
-            self.moveto(z=z, zhop=False, speed=speed)
+            self.moveto(z=z_ceiling, zhop=False)
+            self.moveto(x, y, z_ceiling, zhop=False)
+            self.moveto(z=z, zhop=False)
         else:
-            self._movecommand(x, y, z, speed)
+            self._movecommand(x, y, z)
 
-    def _movecommand(self, x: float, y: float, z: float, speed: float):
+    def _movecommand(self, x: float, y: float, z: float):
         """internal command to execute a direct move from current location to new location"""
         if self.position == [x, y, z]:
             return True  # already at target position
         else:
             self.__targetposition = [x, y, z]
-            self.write(f"G0 X{x} Y{y} Z{z} F{speed}")
+            self.write(f"G0 X{x} Y{y} Z{z}")
             return self._waitformovement()
 
-    def moverel(self, x=0, y=0, z=0, zhop=True, speed=None):
+    def moverel(self, x=0, y=0, z=0, zhop=False):
         """
         moves by coordinates relative to the current position
         """
@@ -152,12 +192,12 @@ class Robot:
         x += self.position[0]
         y += self.position[1]
         z += self.position[2]
-        self.moveto(x, y, z, zhop, speed)
+        self.moveto(x, y, z, zhop)
 
     def _waitformovement(self):
         """
         confirm that gantry has reached target position. returns False if
-        target position is not reached in time allotted by self.GANTRYTIMEOUT
+        target position is not reached in time allotted by self.TIMEOUT
         """
         self.inmotion = True
         start_time = time.time()
@@ -165,7 +205,7 @@ class Robot:
         self._handle.write(f"M400\n".encode())
         self._handle.write(f"M118 E1 FinishedMoving\n".encode())
         reached_destination = False
-        while not reached_destination and time_elapsed < self.GANTRYTIMEOUT:
+        while not reached_destination and time_elapsed < self.TIMEOUT:
             time.sleep(self.POLLINGDELAY)
             while self._handle.in_waiting:
                 line = self._handle.readline().decode("utf-8").strip()
