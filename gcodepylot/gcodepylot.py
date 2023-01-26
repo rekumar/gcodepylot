@@ -1,4 +1,4 @@
-from typing import List
+from abc import ABC, abstractmethod
 import serial
 import time
 import re
@@ -6,23 +6,73 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QGridLayout, QPushButton
 import PyQt5
 from functools import partial
+from gcodepylot.utils import select_port_cli
 
 
-class Robot:
-    POLLINGDELAY: float = (
-        0.01  # seconds between sending a message and polling for a reply
-    )
-    TIMEOUT: float = 10  # seconds
-    POSITIONTOLERANCE: float = 0.1  # tolerance (mm) between target and actual position
-    ZHOP_HEIGHT: float = (
-        5  # height (mm) to raise gantry between movements. This is to avoid collisions.
-    )
-    XLIM: List[int] = [0, 235]  # mm
-    YLIM: List[int] = [0, 235]
-    ZLIM: List[int] = [0, 250]
-    MAX_XY_FEEDRATE: int = 10000  # mm/min
+class RobotXYZ(ABC):
+    #### Required Attributes #####
 
-    def __init__(self, port):
+    @property
+    @abstractmethod
+    def POLLINGDELAY(self) -> float:
+        """The delay (in seconds) between sending a message and polling for a reply."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def TIMEOUT(self) -> float:
+        """The timeout (in seconds) for waiting for a reply."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def POSITIONTOLERANCE(self) -> float:
+        """The tolerance (in mm) between the target and actual position. Positions which are close within this value will be considered equal."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def ZHOP_HEIGHT(self) -> float:
+        """The height (in mm) to raise the z-axis between lateral movements. This is to avoid collisions."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def XLIM(self) -> float:
+        """The limit (in mm) of the x-axis."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def YLIM(self) -> float:
+        """The limit (in mm) of the y-axis."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def ZLIM(self) -> float:
+        """The limit (in mm) of the z-axis."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def MAX_XY_FEEDRATE(self) -> float:
+        """The maximum feedrate (in mm/min) of the x and y axes."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def MAX_Z_FEEDRATE(self) -> float:
+        """The maximum feedrate (in mm/min) of the z axis. Unless specified, we assume this is equal to the MAX_XY_FEEDRATE."""
+        return self.MAX_XY_FEEDRATE
+
+    ##### Class methods #####
+    def __init__(self, port: str = None):
+        """Connects to the robot. Note that you may need to home the robot after connecting before you can move!
+
+        Args:
+            port (str): The port to connect to the robot.
+        """
         # communication variables
         self.port = port
         self.position = [
@@ -34,24 +84,46 @@ class Robot:
         self.connect()  # connect by default
 
     @property
-    def speed(self):
+    def speed(self) -> float:
+        """The speed (as a fraction of the maximum speed, 0-1) of the robot.
+
+        Returns:
+            float: Fraction (0-1) of the maximum speed.
+        """
         return self._speed_fraction
 
     @speed.setter
-    def speed(self, speed):
+    def speed(self, speed: float):
+        """Sets the speed of the robot.
+
+        Args:
+            speed (float): Fraction (0-1) of the maximum speed.
+
+        Raises:
+            ValueError: If the speed is not between 0 and 1.
+        """
         if (speed <= 0) or (speed > 1):
             raise ValueError(
                 f"Speed must be between 0 and 1 (fraction of the maximum speed, which is {self.MAX_XY_FEEDRATE} mm/min)."
             )
         self._speed_fraction = speed
-        self.write(f"G1 F{int(self.MAX_XY_FEEDRATE * speed)}")
+        self.write(f"G0 F{int(self.MAX_XY_FEEDRATE * speed)}")
 
     @property
-    def speed_mm_per_min(self):
+    def speed_mm_per_min(self) -> float:
+        """The speed (in mm/min) of the robot."""
         return self.speed * self.MAX_XY_FEEDRATE
 
     @speed_mm_per_min.setter
-    def speed_mm_per_min(self, speed):
+    def speed_mm_per_min(self, speed: float):
+        """Sets the speed of the robot in mm/min.
+
+        Args:
+            speed (float): The speed (in mm/min) of the robot.
+
+        Raises:
+            ValueError: If the speed is not between 0 and the maximum speed.
+        """
         if (speed <= 0) or (speed > self.MAX_XY_FEEDRATE):
             raise ValueError(
                 f"Speed must be between 0 and {self.MAX_XY_FEEDRATE} mm/min."
@@ -60,13 +132,15 @@ class Robot:
 
     # communication methods
     def connect(self):
+        if self.port is None:
+            self.port = select_port_cli()
         self._handle = serial.Serial(port=self.port, timeout=1, baudrate=115200)
         self.update()
         # self.update_gripper()
         if self.position == [
-            self.XLIM[1],
-            self.YLIM[1],
-            self.ZLIM[1],
+            self.XLIM,
+            self.YLIM,
+            self.ZLIM,
         ]:  # this is what it shows when initially turned on, but not homed
             self.position = [
                 None,
@@ -83,7 +157,7 @@ class Robot:
 
     def _set_defaults(self):
         self.write(
-            f"G203 X{self.MAX_XY_FEEDRATE} Y{self.MAX_XY_FEEDRATE} Z{self.MAX_XY_FEEDRATE}"
+            f"G203 X{self.MAX_XY_FEEDRATE} Y{self.MAX_XY_FEEDRATE} Z{self.MAX_Z_FEEDRATE}"
         )
         self.speed = 0.8
 
@@ -118,7 +192,6 @@ class Robot:
         self.position = [x, y, z]
 
     # gantry methods
-
     def gohome(self):
         self.write("G28 X Y Z")
         self.update()
@@ -139,11 +212,11 @@ class Robot:
             z = self.position[2]
 
         # check if this is a valid coordinate
-        if not (self.XLIM[0] <= x <= self.XLIM[1]):
+        if not (0 <= x <= self.XLIM):
             raise ValueError(f"X coordinate {x} is out of range {self.XLIM}.")
-        if not (self.YLIM[0] <= y <= self.YLIM[1]):
+        if not (0 <= y <= self.YLIM):
             raise ValueError(f"Y coordinate {y} is out of range {self.YLIM}.")
-        if not (self.ZLIM[0] <= z <= self.ZLIM[1]):
+        if not (0 <= z <= self.ZLIM):
             raise ValueError(f"Z coordinate {z} is out of range {self.ZLIM}.")
         return x, y, z
 
@@ -163,7 +236,7 @@ class Robot:
         if zhop:
             z_ceiling = max(self.position[2], z) + self.ZHOP_HEIGHT
             z_ceiling = min(
-                z_ceiling, self.ZLIM[1]
+                z_ceiling, self.ZLIM
             )  # cant z-hop above build volume. mostly here for first move after homing.
             self.moveto(z=z_ceiling, zhop=False)
             self.moveto(x, y, z_ceiling, zhop=False)

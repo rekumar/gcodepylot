@@ -3,6 +3,21 @@ import sys
 from typing import Any, Dict
 
 
+def select_port_cli() -> str:
+    """Selects a port from a list of available ports
+
+    Returns:
+        str: Name of the port to connect to this device
+    """
+    ports = lp.comports()
+    for i, p in enumerate(ports):
+        print(f"[{i}] {p}, {p.hwid}")
+    selection = int(input("Select a port: "))
+    if selection < 0 or selection > i:
+        raise ValueError("Invalid selection")
+    return ports[selection].device
+
+
 def which_os():
     if sys.platform.startswith("win"):
         return "Windows"
@@ -13,7 +28,7 @@ def which_os():
         raise EnvironmentError("Unsupported platform")
 
 
-def _get_port_windows(device_identifiers:Dict[str, Any]) -> str:
+def _get_port_windows(device_identifiers: Dict[str, Any]) -> str:
     """Given a dictionary of pyserial device identifiers, returns the port name
 
     Args:
