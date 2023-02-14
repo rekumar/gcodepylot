@@ -82,6 +82,7 @@ class RobotXYZ(ABC):
         ]  # start at None's to indicate stage has not been homed.
         self.__targetposition = [None, None, None]
         self.connect()  # connect by default
+        self.speed = 0.8  # set the speed to 80% of the maximum speed by default
 
     @property
     def speed(self) -> float:
@@ -107,12 +108,13 @@ class RobotXYZ(ABC):
                 f"Speed must be between 0 and 1 (fraction of the maximum speed, which is {self.MAX_XY_FEEDRATE} mm/min)."
             )
         self._speed_fraction = speed
-        self.write(f"G0 F{int(self.MAX_XY_FEEDRATE * speed)}")
+        # self.write(f"M220 F{int(speed*100)}")
+        self.write(f"G0 F{self.speed_mm_per_min}")
 
     @property
     def speed_mm_per_min(self) -> float:
         """The speed (in mm/min) of the robot."""
-        return self.speed * self.MAX_XY_FEEDRATE
+        return round(self.speed * self.MAX_XY_FEEDRATE, 3)
 
     @speed_mm_per_min.setter
     def speed_mm_per_min(self, speed: float):
@@ -147,6 +149,9 @@ class RobotXYZ(ABC):
                 None,
                 None,
             ]  # start at None's to indicate stage has not been homed.
+        self.write(
+            f"M203 X{self.MAX_XY_FEEDRATE/60} Y{self.MAX_XY_FEEDRATE/60} Z{self.MAX_Z_FEEDRATE/60}"
+        )
         # self.write('M92 X40.0 Y26.77 Z400.0')
         # self.set_defaults()
         print("Connected!")
@@ -297,7 +302,7 @@ class RobotXYZ(ABC):
                 time.sleep(self.POLLINGDELAY)
             time_elapsed = time.time() - start_time
 
-        self.inmotion = ~reached_destination
+        self.inmotion = not reached_destination
         self.update()
         return reached_destination
 
